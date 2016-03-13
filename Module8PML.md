@@ -1,0 +1,181 @@
+---
+title: 'Practical Machine : Prediction Assignment Writeup'
+author: "EthanKong.MJ"
+date: "March 13, 2016"
+output: html_document
+---
+
+#Data 
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+```{r,echo=FALSE,results='hide',warning =FALSE, message=FALSE}
+library(ggplot2)
+library(scales)
+library(dplyr)
+library(caret)
+library(lubridate)
+library(e1071)
+library(randomForest)
+library(tree)
+```
+Load the data
+```{r}
+#loading the data into variables
+Trainingdata <-read.csv("pml-training.csv", na.strings=c("", "NA", "NULL"))
+Testingdata <-read.csv("pml-testing.csv", na.strings=c("", "NA", "NULL"))
+dim(Trainingdata)
+dim(Testingdata)
+```
+
+##Pre-screening the data
+
+* Remove NA values from the file as there are lot of NA values in the file.
+
+```{r}
+training_na <- Trainingdata[ , colSums(is.na(Trainingdata)) == 0]
+dim(training_na)
+
+# remove unrelevant variables
+remove = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+training_clean<- training_na[, -which(names(training_na) %in% remove)]
+dim(training_clean)
+## checking on the variables the extremely low variance only numeric variabls can be evaluated in this way.
+zeroVar= nearZeroVar(training_clean[sapply(training_clean, is.numeric)], saveMetrics = TRUE)
+trainingnonzerovar = training_clean[,zeroVar[, 'nzv']==0]
+dim(trainingnonzerovar)
+## Remove highly correlated variables 90% only numeric variabls can be evaluated in this way.
+corrMatrix <- cor(na.omit(trainingnonzerovar[sapply(trainingnonzerovar, is.numeric)]))
+dim(corrMatrix)
+
+# There are 52 variables in the file.
+corrDF <- expand.grid(row = 1:52, col = 1:52)
+corrDF$correlation <- as.vector(corrMatrix)
+levelplot(correlation ~ row+ col, corrDF)
+
+# remove those variable which have high correlation 
+removecor = findCorrelation(corrMatrix, cutoff = .90, verbose = TRUE)
+trainingdecor = trainingnonzerovar[,-removecor]
+dim(trainingdecor)
+```
+In the end, there are 19622 and 46 variables after all the cleaning process.
+
+##Split data to training and testing for cross validation.
+
+
+```{r}
+inTrain <- createDataPartition(y=trainingdecor$classe, p=0.7, list=FALSE)
+training <- trainingdecor[inTrain,]
+testing <- trainingdecor[-inTrain,]
+dim(training)
+dim(testing)
+```
+In the file,there are 13737 samples and 46 variables for training, 5885 samples and 46 variables for testing.
+
+#Analysis
+##Regression Tree
+
+It is time to summarize and plot the data. First, we use the 'tree' package. It is much faster than 'caret' package.
+
+```{r}
+set.seed(8)
+tree.training=tree(classe~.,data=training)
+summary(tree.training)
+plot(tree.training)
+text(tree.training,pretty=0, cex =.8)
+```
+
+This is a bushy tree, and we are going to prune it.
+
+Rpart form Caret,which is very slow in the generating the outcome.
+
+```{r}
+modFit <- train(classe ~ .,method="rpart",data=training)
+print(modFit$finalModel)
+```
+
+#Cross Validation
+We are going to check the performance of the tree on the testing data by cross validation.
+
+```{r}
+tree.pred=predict(tree.training,testing,type="class")
+predMatrix = with(testing,table(tree.pred,classe))
+sum(diag(predMatrix))/sum(as.vector(predMatrix)) # error rate
+```
+
+The 0.70 is not very accurate count.
+```{r}
+tree.pred=predict(modFit,testing)
+predMatrix = with(testing,table(tree.pred,classe))
+sum(diag(predMatrix))/sum(as.vector(predMatrix)) # error rate
+
+```
+The 0.50 from 'caret' package is much lower than the result from 'tree' package.
+
+##Pruning tree
+
+This tree was grown to full depth, and might be too variable. We now use Cross Validation to prune it.
+```{r}
+cv.training=cv.tree(tree.training,FUN=prune.misclass)
+cv.training
+plot(cv.training)
+```
+It shows that when the size of the tree goes down, the deviance goes up. It means the 21 is a good size (i.e. number of terminal nodes) for this tree. We do not need to prune it.
+
+Suppose we prune it at size of nodes at 18.
+```{r}
+prune.training=prune.misclass(tree.training,best=18)
+```
+Now lets evaluate this pruned tree on the test data.
+```{r}
+tree.pred=predict(prune.training,testing,type="class")
+predMatrix = with(testing,table(tree.pred,classe))
+sum(diag(predMatrix))/sum(as.vector(predMatrix)) # error rate
+```
+
+0.66 is a little less than 0.70, so pruning did not hurt us with repect to misclassification errors, and gave us a simpler tree. We use less predictors to get almost the same result. By pruning, we got a shallower tree, which is easier to interpret.
+
+The single tree is not good enough, so we are going to use bootstrap to improve the accuracy. We are going to try random forests.
+
+#Random Forests
+
+These methods use trees as building blocks to build more complex models.
+
+##Random Forests
+
+Random forests build lots of bushy trees, and then average them to reduce the variance.
+```{r}
+require(randomForest)
+set.seed(9)
+rf.training=randomForest(classe~.,data=training,ntree=100, importance=TRUE)
+rf.training
+
+varImpPlot(rf.training,)
+```
+we can see which variables have higher impact on the prediction.
+
+##Out-of Sample Accuracy
+Our Random Forest model shows OOB estimate of error rate: 0.72% for the training data. Now we will predict it for out-of sample accuracy.
+
+Now lets evaluate this tree on the test data.
+```{r}
+tree.pred=predict(rf.training,testing,type="class")
+predMatrix = with(testing,table(tree.pred,classe))
+sum(diag(predMatrix))/sum(as.vector(predMatrix)) # error rate
+```
+0.99 means we got a very accurate estimate.
+
+Number of variables tried at each split: 6. It means every time we only randomly use 6 predictors to grow the tree. Since p = 43, we can have it from 1 to 43, but it seems 6 is enough to get the good result.
+
+#Conclusion
+Now we can predict the testing data from the website
+
+```{r}
+answers <- predict(rf.training, Testingdata)
+answers
+
+```
